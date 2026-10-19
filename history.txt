@@ -1,0 +1,33 @@
+sudo apt-get install -y isc-dhcp-server isc-dhcp-client wireshark traceroute dnsutils
+mkdir -p ~/Downloads/Lab3
+cd ~/Downloads/Lab3
+ip -br address
+ip -br link
+ip route
+printf '%s\n' 'timeout 12;' 'select-timeout 2;' 'initial-interval 1;' 'request subnet-mask, broadcast-address, routers, domain-name, domain-name-servers;' > dhclient.conf
+sudo cp dhclient.conf /etc/dhcp/dhclient-lab3.conf
+sudo dumpcap -q -i enp0s3 -f 'udp port 67 or udp port 68' -a duration:15 -w - > dhcp-baseline.pcapng 2> capture-baseline.log &
+sudo timeout 12s dhclient -4 -1 -v -cf /etc/dhcp/dhclient-lab3.conf -lf /var/lib/dhcp/dhclient-lab3-baseline.leases -pf /run/dhclient-lab3.pid enp0s3 2>&1 | tee dhcp-client-baseline.log
+sudo dhclient -r -lf /var/lib/dhcp/dhclient-lab3-baseline.leases -pf /run/dhclient-lab3.pid enp0s3
+sudo nmcli device set enp0s3 managed no && sudo ip -4 addr flush dev enp0s3
+sudo dumpcap -q -i enp0s3 -f 'udp port 67 or udp port 68' -a duration:15 -w - > dhcp-router.pcapng 2> capture-router.log & CAPTURE_PID=$!; sleep 1; sudo timeout 12s dhclient -4 -1 -v -cf /etc/dhcp/dhclient-lab3.conf -lf /var/lib/dhcp/dhclient-lab3-router.leases -pf /run/dhclient-lab3.pid enp0s3 2>&1 | tee dhcp-client-router.log; wait "$CAPTURE_PID"
+ip -4 address show dev enp0s3 | tee address-router.txt; ip route | tee routes-router.txt; sudo cat /var/lib/dhcp/dhclient-lab3-router.leases | tee client-router.leases; ping -c 3 10.0.2.2 | tee ping-router.log; traceroute -n -m 3 -w 1 10.0.2.2 | tee traceroute-router.log
+sudo dhclient -r -lf /var/lib/dhcp/dhclient-lab3-router.leases -pf /run/dhclient-lab3.pid enp0s3 && sudo ip -4 addr flush dev enp0s3 && sudo ip addr add 10.0.2.20/24 dev enp0s3 && sudo ip route replace default via 10.0.2.2 dev enp0s3
+printf '%s\n' 'default-lease-time 600;' 'max-lease-time 7200;' 'ping-check false;' 'server-identifier 10.0.2.20;' 'option domain-name "lab3.example";' 'subnet 10.0.2.0 netmask 255.255.255.0 {' '  range 10.0.2.50 10.0.2.60;' '  option subnet-mask 255.255.255.0;' '  option broadcast-address 10.0.2.255;' '  option routers 10.0.2.2;' '  option domain-name-servers 1.1.1.1, 8.8.8.8;' '}' > dhcpd.conf
+sudo cp dhcpd.conf /etc/dhcp/dhcpd.conf
+printf '%s\n' 'INTERFACESv4="enp0s3"' 'INTERFACESv6=""' | sudo tee /etc/default/isc-dhcp-server
+sudo dhcpd -t -cf /etc/dhcp/dhcpd.conf
+sudo systemctl start isc-dhcp-server
+cat /etc/dhcp/dhcpd.conf; cat /etc/default/isc-dhcp-server; systemctl status isc-dhcp-server --no-pager -l | tee server-status.txt; ip -4 address show dev enp0s3
+sudo dumpcap -q -i enp0s3 -f 'udp port 67 or udp port 68' -a duration:15 -w - > dhcp-conflict.pcapng 2> capture-conflict.log & CAPTURE_PID=$!; sleep 1; sudo timeout 12s dhclient -4 -1 -v -cf /etc/dhcp/dhclient-lab3.conf -lf /var/lib/dhcp/dhclient-lab3-conflict.leases -pf /run/dhclient-lab3.pid enp0s3 2>&1 | tee dhcp-client-conflict.log; wait "$CAPTURE_PID"
+sudo cat /var/lib/dhcp/dhcpd.leases | tee server-conflict.leases; sudo cat /var/lib/dhcp/dhclient-lab3-conflict.leases | tee client-conflict.leases; ip -4 address show dev enp0s3 | tee address-conflict.txt; ip route | tee routes-conflict.txt; sudo journalctl -u isc-dhcp-server -n 20 --no-pager > dhcp-server-conflict.log
+cat dhcpd.conf && cat /etc/default/isc-dhcp-server && systemctl status isc-dhcp-server --no-pager -n 0
+sudo systemctl disable --now isc-dhcp-server && sudo dhclient -r -lf /var/lib/dhcp/dhclient-lab3-conflict.leases -pf /run/dhclient-lab3.pid enp0s3 && sudo ip -4 addr flush dev enp0s3
+sudo dumpcap -q -i enp0s3 -f 'udp port 67 or udp port 68' -a duration:15 -w - > dhcp-recovered.pcapng 2> capture-recovered.log & CAPTURE_PID=$!; sleep 1; sudo timeout 12s dhclient -4 -1 -v -cf /etc/dhcp/dhclient-lab3.conf -lf /var/lib/dhcp/dhclient-lab3-recovered-single.leases -pf /run/dhclient-lab3.pid enp0s3 2>&1 | tee dhcp-client-recovered.log; wait "$CAPTURE_PID"
+systemctl show isc-dhcp-server -p ActiveState -p UnitFileState; ip -4 address show dev enp0s3 | tee address-recovered.txt; ip route | tee routes-recovered.txt; sudo cat /var/lib/dhcp/dhclient-lab3-recovered-single.leases > client-recovered.leases; grep -E 'fixed-address|domain-name-servers|dhcp-server-identifier' client-recovered.leases; ping -c 3 10.0.2.2 | tee ping-recovered.log
+sudo dumpcap -q -i enp0s3 -f 'udp port 53' -a duration:12 -w - > dns.pcapng 2> capture-dns.log & CAPTURE_PID=$!; sleep 1; dig example.org +tries=1 +time=3 | tee dns-query.log; wait "$CAPTURE_PID"
+tshark -r dhcp-router.pcapng -n; tshark -r dhcp-conflict.pcapng -n; tshark -r dhcp-recovered.pcapng -n; tshark -r dns.pcapng -n
+sudo dhclient -r -lf /var/lib/dhcp/dhclient-lab3-recovered-single.leases -pf /run/dhclient-lab3.pid enp0s3 && sudo nmcli device set enp0s3 managed yes && sudo nmcli device connect enp0s3
+ifconfig enp0s3; tshark -r dhcp-conflict.pcapng -Y 'dhcp.option.dhcp == 2 || dhcp.option.dhcp == 3 || dhcp.option.dhcp == 5 || dhcp.option.dhcp == 6' -V > dhcp-conflict-details.txt; wireshark -r "$PWD/dhcp-conflict.pcapng" -Y dhcp -g 2 > /tmp/wireshark-conflict.log 2>&1 & history -w history.txt
+sudo nmcli connection up netplan-enp0s3
+ifconfig enp0s3; ip route; ping -c 3 10.0.2.2; history -w history.txt
